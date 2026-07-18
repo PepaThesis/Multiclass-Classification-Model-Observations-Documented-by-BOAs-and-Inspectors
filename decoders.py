@@ -1,7 +1,7 @@
 """
-Multi-Class Text Classifier — Decoder models (QLoRA)
+Multi-Class Text Classifier â Decoder models (QLoRA)
 ========================================================
-Supports all five decoder models out of the box. Change MODEL_NAME and run.
+Supports all five decoder models. Change MODEL_NAME and run.
 
 Decoder models (this script):
     "GroNLP/gpt2-small-dutch"          ~117M  Dutch GPT-2
@@ -9,12 +9,6 @@ Decoder models (this script):
     "facebook/opt-1.3b"                ~1.3B  multilingual baseline
     "BramVanroy/fietje-2b"             ~2.0B  Dutch  (reduce BATCH_SIZE to 2 if OOM)
 
-THIS VERSION: gradient checkpointing fully DISABLED (both the explicit
-enable call and the prepare_model_for_kbit_training flag) — the Phi
-remote-code path used by Fietje is incompatible with checkpointing on
-current torch. use_cache is still disabled during training.
-If a model OOMs without checkpointing: set batch_size=1 and
-accumulation=16 in its registry entry (same effective batch of 16).
 
 Inputs : train.xlsx  (columns: text, class)
          dev.xlsx    (columns: text, class)
@@ -22,22 +16,8 @@ Outputs: classification_report.txt  |  confusion_matrix.png
          misclassifications.xlsx    |  low_confidence_predictions.xlsx
          training_history.png       |  best_adapter/  (LoRA weights)
 
-CHANGES vs previous version (all marked with "# CHANGED"):
-  - HF token no longer hardcoded: read from Kaggle Secrets / env var
-    (REVOKE the old leaked token at huggingface.co -> Settings -> Tokens!)
-  - final evaluation rebuilt: frees the training model first (prevents the
-    silent OOM kill at "Loading best checkpoint"), then loads the saved
-    adapter via PeftModel.from_pretrained instead of the broken
-    get_peft_model + load_adapter("default") combination
-  - epochs_no_improve initialised before the training loop
-  - num_workers=0, pin_memory=False (silent-kernel-death fix on Kaggle)
-  - all outputs written to /kaggle/working when available
-  - RAM/VRAM probes after each stage and each epoch (psutil)
-  - evaluation log/report header states the actual eval file name
 """
 
-# ── Must be set BEFORE any torch import ──────────────────────────────────────
-import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import subprocess, sys
@@ -72,28 +52,24 @@ from sklearn.preprocessing import LabelEncoder
 
 warnings.filterwarnings("ignore")
 
-# ── CHANGED: HF token from Kaggle Secrets or environment, never hardcoded ────
-# Kaggle: Add-ons -> Secrets -> add a secret named HF_TOKEN.
-# The old hardcoded token was exposed: revoke it on huggingface.co!
 HF_TOKEN = None
 try:
     from kaggle_secrets import UserSecretsClient
     HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN")
 except Exception:
-    HF_TOKEN = os.environ.get("HF_TOKEN")  # falls back to env var, else None
-# None is fine: none of the registry models are gated.
+    HF_TOKEN = os.environ.get("HF_TOKEN")  
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  ▶  CHANGE THIS LINE TO SWITCH MODELS — everything else auto-configures
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+#  â¶  CHANGE THIS LINE TO SWITCH MODELS â everything else auto-configures
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 MODEL_NAME = "BramVanroy/fietje-2b"
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  MODEL REGISTRY
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 MODEL_REGISTRY = {
 
-    # ── Dutch GPT-2 (117M) ───────────────────────────────────────────────────
+    # ââ Dutch GPT-2 (117M) âââââââââââââââââââââââââââââââââââââââââââââââââââ
     "GroNLP/gpt2-small-dutch": dict(
         padding_side   = "left",
         max_len        = 128,
@@ -102,14 +78,14 @@ MODEL_REGISTRY = {
         lora_r         = 16,
         lora_alpha     = 32,
         lora_dropout   = 0.05,
-        # GPT-2 uses Conv1D projections — target the attention projections
+        # GPT-2 uses Conv1D projections â target the attention projections
         target_modules = ["c_attn", "c_proj"],
         use_qlora      = True,
         accumulation   = 4,
         epochs         = 7,
     ),
 
-    # ── Qwen 0.5B ────────────────────────────────────────────────────────────
+    # ââ Qwen 0.5B ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     "Qwen/Qwen2.5-0.5B": dict(
         padding_side   = "left",
         max_len        = 128,
@@ -125,7 +101,7 @@ MODEL_REGISTRY = {
         epochs         = 7,
     ),
 
-    # ── OPT 1.3B (note: 1.3 billion — not 13B) ───────────────────────────────
+    # ââ OPT 1.3B (note: 1.3 billion â not 13B) âââââââââââââââââââââââââââââââ
     "facebook/opt-1.3b": dict(
         padding_side   = "left",
         max_len        = 128,
@@ -140,7 +116,7 @@ MODEL_REGISTRY = {
         epochs         = 7,
     ),
 
-    # ── Fietje 2B (Dutch) ────────────────────────────────────────────────────
+    # ââ Fietje 2B (Dutch) ââââââââââââââââââââââââââââââââââââââââââââââââââââ
     "BramVanroy/fietje-2b": dict(
         padding_side   = "left",
         max_len        = 128,
@@ -164,7 +140,7 @@ assert MODEL_NAME in MODEL_REGISTRY, (
 
 cfg = MODEL_REGISTRY[MODEL_NAME]
 
-# ── Unpack config ─────────────────────────────────────────────────────────────
+# ââ Unpack config âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 PADDING_SIDE       = cfg["padding_side"]
 MAX_LEN            = cfg["max_len"]
 BATCH_SIZE         = cfg["batch_size"]
@@ -177,12 +153,10 @@ USE_QLORA          = cfg["use_qlora"]
 ACCUMULATION_STEPS = cfg["accumulation"]
 EPOCHS             = cfg["epochs"]
 
-# ── Fixed hyperparameters ─────────────────────────────────────────────────────
+# ââ Fixed hyperparameters âââââââââââââââââââââââââââââââââââââââââââââââââââââ
 TRAIN_FILE        = "/kaggle/input/datasets/train.xlsx"
 DEV_FILE          = "/kaggle/input/datasets/dev.xlsx"
 
-# CHANGED: write everything to /kaggle/working when on Kaggle, so outputs
-# and the adapter survive background ("Save & Run All") execution.
 WORK_DIR          = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 OUTPUT_DIR        = os.path.join(WORK_DIR, "best_adapter")
 WARMUP_RATIO      = 0.15
@@ -193,9 +167,9 @@ PATIENCE          = 2   # stop if dev_loss doesn't improve for 2 epochs
 
 EVAL_NAME = os.path.basename(DEV_FILE)  # CHANGED: honest name in logs/reports
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  REPRODUCIBILITY, DEVICE & MEMORY PROBE
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+#  REPRODUCIBILITY, DEVICE & MEMORY
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -204,8 +178,6 @@ def set_seed(seed):
 set_seed(SEED)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# CHANGED: memory probe — if RAM% climbs toward 100 in the log before a
-# silent stop, the kernel was OOM-killed.
 def mem_report(tag: str):
     ram = psutil.virtual_memory()
     line = f"  [mem] {tag}: RAM {ram.percent:.0f}% ({ram.used/1e9:.1f}/{ram.total/1e9:.1f} GB)"
@@ -213,9 +185,9 @@ def mem_report(tag: str):
         line += f"  VRAM {torch.cuda.memory_allocated()/1e9:.1f} GB"
     print(line)
 
-print(f"▶ Model   : {MODEL_NAME}")
+print(f"â¶ Model   : {MODEL_NAME}")
 print(f"  QLoRA   : {USE_QLORA}  |  MAX_LEN: {MAX_LEN}  |  "
-      f"Batch: {BATCH_SIZE}×{ACCUMULATION_STEPS}={BATCH_SIZE*ACCUMULATION_STEPS}")
+      f"Batch: {BATCH_SIZE}Ã{ACCUMULATION_STEPS}={BATCH_SIZE*ACCUMULATION_STEPS}")
 print(f"  Eval on : {EVAL_NAME}")
 print(f"  Output  : {WORK_DIR}")
 if device.type == "cuda":
@@ -223,10 +195,10 @@ if device.type == "cuda":
           f"({torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB)")
 mem_report("start")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  DATA
-# ─────────────────────────────────────────────────────────────────────────────
-print("\n▶ Loading data …")
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+print("\nâ¶ Loading data âŠ")
 train_df = pd.read_excel(TRAIN_FILE)
 dev_df   = pd.read_excel(DEV_FILE)
 train_df.columns = [c.strip().lower() for c in train_df.columns]
@@ -257,13 +229,13 @@ print(f"  Weights: { {class_names[i]: round(_weights[i], 3) for i in range(num_l
 
 dev_only = set(dev_df["class"].unique()) - set(train_df["class"].unique())
 if dev_only:
-    print(f"  ⚠  Classes in eval but NOT in train: {sorted(dev_only)}")
+    print(f"  â   Classes in eval but NOT in train: {sorted(dev_only)}")
 mem_report("after data loading")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  TOKENISER
-# ─────────────────────────────────────────────────────────────────────────────
-print(f"\n▶ Loading tokeniser …")
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+print(f"\nâ¶ Loading tokeniser âŠ")
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
 )
@@ -284,12 +256,12 @@ print(f"  p50={int(np.percentile(_lengths, 50))}  p90={int(np.percentile(_length
       f"p95={_p95}  p99={int(np.percentile(_lengths, 99))}")
 print(f"  Truncated at MAX_LEN={MAX_LEN}: {_pct:.1f}% of train samples")
 if _p95 > MAX_LEN:
-    print(f"  ⚠  p95 ({_p95}) > MAX_LEN ({MAX_LEN}) → consider raising MAX_LEN")
+    print(f"  â   p95 ({_p95}) > MAX_LEN ({MAX_LEN}) â consider raising MAX_LEN")
 del _lengths
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  DATASET
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 class TextDataset(Dataset):
     def __init__(self, texts, labels, tokenizer, max_len):
         self.texts, self.labels = texts.tolist(), labels.tolist()
@@ -312,8 +284,6 @@ class TextDataset(Dataset):
             "labels":         torch.tensor(self.labels[idx], dtype=torch.long),
         }
 
-# CHANGED: num_workers=0, pin_memory=False — worker processes duplicate the
-# dataset in RAM on Kaggle/Colab and are the most common silent-hang source.
 train_loader = DataLoader(
     TextDataset(train_df["text"], train_df["label"], tokenizer, MAX_LEN),
     batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=False,
@@ -323,10 +293,10 @@ dev_loader = DataLoader(
     batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=False,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  MODEL
-# ─────────────────────────────────────────────────────────────────────────────
-print(f"\n▶ Loading model ({'4-bit QLoRA' if USE_QLORA else 'full precision'}) …")
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+print(f"\nâ¶ Loading model ({'4-bit QLoRA' if USE_QLORA else 'full precision'}) âŠ")
 
 model_config = AutoConfig.from_pretrained(
     MODEL_NAME,
@@ -357,10 +327,6 @@ if bnb_config:
 
 base_model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, **load_kwargs)
 
-# The KV cache is useless during training and was implicated in the
-# gradient checkpointing — it changes how many tensors the recomputed
-# forward pass saves ("A different number of tensors was saved ...").
-# The cache is useless during training anyway.
 base_model.config.use_cache = False
 
 if USE_QLORA:
@@ -368,7 +334,6 @@ if USE_QLORA:
         base_model, use_gradient_checkpointing=False
     )
 
-# Sync pad token id into model config
 base_model.config.pad_token_id = tokenizer.pad_token_id
 
 lora_config = LoraConfig(
@@ -395,9 +360,9 @@ scheduler = get_cosine_schedule_with_warmup(
     optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  EVALUATE
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 def evaluate(model, loader):
     model.eval()
     all_preds, all_labels, all_confs, all_probs = [], [], [], []
@@ -424,10 +389,10 @@ def evaluate(model, loader):
         np.array(all_probs),
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  TRAINING LOOP
-# ─────────────────────────────────────────────────────────────────────────────
-print("\n▶ Training …\n" + "─" * 60)
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+print("\nâ¶ Training âŠ\n" + "â" * 60)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 model.save_pretrained(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
@@ -486,24 +451,22 @@ for epoch in range(1, EPOCHS + 1):
         epochs_no_improve = 0
         model.save_pretrained(OUTPUT_DIR)
         tokenizer.save_pretrained(OUTPUT_DIR)
-        print(f"  ✓ Saved (dev_loss={dev_loss:.4f})")
+        print(f"  â Saved (dev_loss={dev_loss:.4f})")
     else:
         epochs_no_improve += 1
         if epochs_no_improve >= PATIENCE:
-            print(f"\n  ⏹ Early stopping at epoch {epoch}")
+            print(f"\n  â¹ Early stopping at epoch {epoch}")
             break
 
     torch.cuda.empty_cache()
 
-print("\n" + "─" * 60)
+print("\n" + "â" * 60)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 #  FINAL EVALUATION
-# ─────────────────────────────────────────────────────────────────────────────
-# CHANGED: free the training model FIRST (prevents holding two copies of a
-# 2B model in memory — the silent OOM kill at exactly this point), then load
-# the saved adapter the canonical way with PeftModel.from_pretrained.
-print("\n▶ Loading best checkpoint for final evaluation …")
+# âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+
+print("\nâ¶ Loading best checkpoint for final evaluation âŠ")
 del model, base_model, optimizer, scheduler
 gc.collect()
 torch.cuda.empty_cache()
@@ -517,8 +480,8 @@ mem_report("after loading best checkpoint")
 
 _, final_preds, final_labels, final_confs, final_probs = evaluate(best_model, dev_loader)
 
-# ── Classification report ─────────────────────────────────────────────────────
-print(f"\n▶ Classification report ({EVAL_NAME}):\n")
+# ââ Classification report âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+print(f"\nâ¶ Classification report ({EVAL_NAME}):\n")
 present_ids   = sorted(set(final_labels.tolist()) | set(final_preds.tolist()))
 present_names = [class_names[i] for i in present_ids]
 report = classification_report(
@@ -527,10 +490,10 @@ report = classification_report(
 )
 print(report)
 with open(os.path.join(WORK_DIR, "classification_report.txt"), "w", encoding="utf-8") as f:
-    f.write(f"Classification Report — {MODEL_NAME}  (eval file: {EVAL_NAME})\n"
+    f.write(f"Classification Report â {MODEL_NAME}  (eval file: {EVAL_NAME})\n"
             + "=" * 60 + "\n\n" + report)
 
-# ── Confusion matrix ──────────────────────────────────────────────────────────
+# ââ Confusion matrix ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 cm = confusion_matrix(final_labels, final_preds, labels=present_ids)
 fig, ax = plt.subplots(figsize=(10, 8))
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
@@ -538,13 +501,13 @@ sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
             ax=ax, linewidths=0.5)
 ax.set_xlabel("Predicted label", fontsize=12)
 ax.set_ylabel("True label", fontsize=12)
-ax.set_title(f"Confusion Matrix — {MODEL_NAME.split('/')[-1]}", fontsize=14)
+ax.set_title(f"Confusion Matrix â {MODEL_NAME.split('/')[-1]}", fontsize=14)
 plt.xticks(rotation=45, ha="right"); plt.yticks(rotation=0)
 plt.tight_layout()
 plt.savefig(os.path.join(WORK_DIR, "confusion_matrix.png"), dpi=150)
 plt.close()
 
-# ── Misclassifications ────────────────────────────────────────────────────────
+# ââ Misclassifications ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 mis_mask    = final_preds != final_labels
 mis_probs   = final_probs[mis_mask]
 sec_ids     = np.argsort(mis_probs, axis=1)[:, -2]
@@ -560,7 +523,7 @@ misclass_df = pd.DataFrame({
 misclass_df.sort_values(["uncertain", "confidence"], ascending=[False, True]) \
            .to_excel(os.path.join(WORK_DIR, "misclassifications.xlsx"), index=False)
 
-# ── Low-confidence predictions ────────────────────────────────────────────────
+# ââ Low-confidence predictions ââââââââââââââââââââââââââââââââââââââââââââââââ
 lc_mask   = final_confs < CONFIDENCE_THRESH
 lc_probs  = final_probs[lc_mask]
 lc_sec    = np.argsort(lc_probs, axis=1)[:, -2]
@@ -577,7 +540,7 @@ lowconf_df.sort_values("confidence") \
           .to_excel(os.path.join(WORK_DIR, "low_confidence_predictions.xlsx"), index=False)
 n_unc = lc_mask.sum()
 
-# ── Training history ──────────────────────────────────────────────────────────
+# ââ Training history ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 hdf = pd.DataFrame(history)
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 axes[0].plot(hdf["epoch"], hdf["train_loss"], marker="o", label="Train")
@@ -591,7 +554,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(WORK_DIR, "training_history.png"), dpi=150)
 plt.close()
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# ââ Summary âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 overall_acc = (final_preds == final_labels).mean()
 print("\n" + "=" * 60)
 print("SUMMARY")
@@ -608,5 +571,5 @@ print(f"\nOutput files (in {WORK_DIR}):")
 for f in ["classification_report.txt", "confusion_matrix.png",
           "misclassifications.xlsx", "low_confidence_predictions.xlsx",
           "training_history.png", OUTPUT_DIR + "/"]:
-    print(f"  • {f}")
+    print(f"  â¢ {f}")
 print("=" * 60)
