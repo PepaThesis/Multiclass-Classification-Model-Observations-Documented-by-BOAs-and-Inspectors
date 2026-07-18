@@ -4,11 +4,11 @@ Dutch Multi-Class Text Classifier â Multi-Model Edition
 Supports:
   1. pdelobelle/robbert-v2-dutch-base          (RobBERT v2)
   2. DTAI-KULeuven/robbert-2023-dutch-base      (RobBERT 2023 base)
-  4. GroNLP/bert-base-dutch-cased               (BERTje)
-  5. bert-base-multilingual-cased               (mBERT)
-  6. microsoft/mdeberta-v3-base                 (mDeBERTa v3)
-  7. microsoft/deberta-v3-large                 (DeBERTa-XLM / v3 large)
-  8. Geotrend/bert-base-nl-cased                (Geotrend NL BERT)
+  3. GroNLP/bert-base-dutch-cased               (BERTje)
+  4. bert-base-multilingual-cased               (mBERT)
+  5. microsoft/mdeberta-v3-base                 (mDeBERTa v3)
+  6. microsoft/deberta-v3-large                 (DeBERTa-XLM / v3 large)
+  7. Geotrend/bert-base-nl-cased                (Geotrend NL BERT)
 
 Inputs : train.xlsx  (columns: text, class)
          dev.xlsx    (columns: text, class)
