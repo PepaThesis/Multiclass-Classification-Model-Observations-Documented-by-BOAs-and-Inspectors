@@ -2,7 +2,7 @@
 # ["Acting","Assisting","Communicating","Cooperating","Coping",
 #  "Informing","Investigating","Networking","Observing"]
 #
-# No sklearn Pipeline — steps are explicit:
+# No sklearn Pipeline â steps are explicit:
 #   1. TF-IDF vectorization
 #   2. Chi-squared feature selection (multiple k values compared)
 #   3. LinearSVC training & evaluation
@@ -126,7 +126,7 @@ def print_summary(metrics: dict):
 # ---------------------------------------------------------------------------
 
 def main():
-    # ── Load data ──────────────────────────────────────────────────────────
+    # ââ Load data ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
     train_df = load_data("train.xlsx")
     print(f"[Info] Loaded {len(train_df)} rows from train.xlsx")
 
@@ -147,8 +147,8 @@ def main():
     X_dev_raw   = dev_df["text"].values
     y_true      = dev_df["class"].values
 
-    # ── Step 1: TF-IDF vectorisation (fit on train only) ──────────────────
-    print("\n[Step 1] Fitting TF-IDF vectoriser …")
+    # ââ Step 1: TF-IDF vectorisation (fit on train only) ââââââââââââââââââ
+    print("\n[Step 1] Fitting TF-IDF vectoriser âŠ")
     #stoplist = get_dutch_stopwords()
 
     tfidf = TfidfVectorizer(
@@ -164,7 +164,7 @@ def main():
     X_dev_tfidf   = tfidf.transform(X_dev_raw)
     print(f"  TF-IDF shape (train): {X_train_tfidf.shape}")
 
-    # ── Step 2 + 3: Chi-squared selection → SVM, for each k ───────────────
+    # ââ Step 2 + 3: Chi-squared selection âââââââââââââââ
     comparison_rows = []
 
     for k in K_VALUES:
@@ -173,9 +173,9 @@ def main():
         actual_k = n_features if k == "all" else min(k, n_features)
         effective_k = "all" if actual_k == n_features else actual_k
         print(f"\n{'='*60}")
-        print(f"[Chi2 k={k_label}]  selecting {actual_k} features …")
+        print(f"[Chi2 k={k_label}]  selecting {actual_k} features âŠ")
 
-        # Feature selection (clamp k so it never exceeds available features)
+        # Feature selection
         selector = SelectKBest(chi2, k=effective_k)
         X_train_sel = selector.fit_transform(X_train_tfidf, y_train)
         X_dev_sel   = selector.transform(X_dev_tfidf)
@@ -200,16 +200,16 @@ def main():
         plot_and_save_confusion_matrix(
             y_true, y_pred, labels_sorted,
             out_path=f"confusion_matrix_k{safe_k}.png",
-            title=f"SVM Confusion Matrix — counts  (k={k_label})",
+            title=f"SVM Confusion Matrix â counts  (k={k_label})",
         )
         plot_and_save_confusion_matrix(
             y_true, y_pred, labels_sorted,
             out_path=f"confusion_matrix_k{safe_k}_norm.png",
-            title=f"SVM Confusion Matrix — row-normalised  (k={k_label})",
+            title=f"SVM Confusion Matrix â row-normalised  (k={k_label})",
             normalize="true",
         )
 
-        # Save best model artefacts for later error analysis
+        # Save best model for later error analysis
         row = {"k": k_label, "n_features": actual_k, **metrics}
         comparison_rows.append(row)
 
@@ -219,7 +219,7 @@ def main():
         comparison_rows[-1]["_clf"]      = clf
         comparison_rows[-1]["_y_pred"]   = y_pred
 
-    # ── Comparison table ───────────────────────────────────────────────────
+    # ââ Comparison table âââââââââââââââââââââââââââââââââââââââââââââââââââ
     print(f"\n{'='*60}")
     print("[Comparison across k values]")
     display_cols = ["k", "n_features", "accuracy", "macro_f1", "weighted_f1", "micro_f1"]
@@ -232,7 +232,7 @@ def main():
     comp_df.to_csv("chi2_k_comparison.csv", index=False)
     print("\n[Saved] chi2_k_comparison.csv")
 
-    # ── Pick best k by macro F1 ────────────────────────────────────────────
+    # ââ Pick best k by macro F1 ââââââââââââââââââââââââââââââââââââââââââââ
     best_row = max(comparison_rows, key=lambda r: r["macro_f1"])
     best_k   = best_row["k"]
     print(f"\n[Best k by macro F1] k={best_k}  (macro F1 = {best_row['macro_f1']:.4f})")
@@ -242,7 +242,7 @@ def main():
     selector_best = best_row["_selector"]
     clf_best      = best_row["_clf"]
 
-    # ── Error analysis for best k ──────────────────────────────────────────
+    # ââ Error analysis for best k ââââââââââââââââââââââââââââââââââââââââââ
     errors = pd.DataFrame({
         "text":            dev_df["text"].values,
         "true_label":      y_true,
@@ -250,7 +250,7 @@ def main():
     })
     errors = errors[errors["true_label"] != errors["predicted_label"]].copy()
 
-    print(f"\n[Error analysis — k={best_k}]  "
+    print(f"\n[Error analysis â k={best_k}]  "
           f"{len(errors)} misclassified out of {len(dev_df)} examples.")
     print(errors.head(20))
 
@@ -278,7 +278,7 @@ def main():
         comp_df.to_excel(writer,         index=False, sheet_name="k_comparison")
     print("[Saved] misclassified_examples.xlsx")
 
-    # ── Persist best model ─────────────────────────────────────────────────
+    # ââ Persist best model âââââââââââââââââââââââââââââââââââââââââââââââââ
     joblib.dump(
         {"tfidf": tfidf_best, "selector": selector_best, "clf": clf_best},
         "svm_text_model.joblib",
